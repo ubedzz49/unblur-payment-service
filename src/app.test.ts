@@ -324,6 +324,23 @@ describe("POST /payments/:id/confirm", () => {
     expect(res.statusCode).toBe(404);
   });
 
+  // regression: real clients (including our own frontend's request() helper) send
+  // Content-Type: application/json on every request regardless of whether there's a body --
+  // Fastify's default JSON parser rejects an empty body when that header is present, which
+  // would break this exact no-body endpoint in real use
+  it("accepts an empty body with Content-Type: application/json set (real client behavior)", async () => {
+    const app = newApp();
+    const collected = await collect(app);
+    const paymentId = collected.json().paymentId;
+    const res = await app.inject({
+      method: "POST",
+      url: `/payments/${paymentId}/confirm`,
+      headers: { "x-user-id": PAYER_ID, "content-type": "application/json" },
+      payload: "",
+    });
+    expect(res.statusCode).toBe(200);
+  });
+
   it("403s a non-payer trying to confirm", async () => {
     const app = newApp();
     const collected = await collect(app);
