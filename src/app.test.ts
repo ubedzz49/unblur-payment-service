@@ -2,14 +2,15 @@ import { describe, expect, it } from "vitest";
 import { buildApp } from "./app.js";
 import { InMemoryPaymentRepository } from "./payments/repository.js";
 import { FakeSandboxGateway, FORCE_FAILURE_AMOUNT_CENTS } from "./gateway/provider.js";
+import { FakeNotificationClient } from "./notifications/client.js";
 
 const INTERNAL_TOKEN = "test-internal-token";
 const PAYER_ID = "11111111-1111-1111-1111-111111111111";
 const RECIPIENT_ID = "22222222-2222-2222-2222-222222222222";
 const BOOKING_ID = "33333333-3333-3333-3333-333333333333";
 
-function newApp() {
-  return buildApp(new InMemoryPaymentRepository(), new FakeSandboxGateway(), INTERNAL_TOKEN);
+function newApp(notificationClient = new FakeNotificationClient()) {
+  return buildApp(new InMemoryPaymentRepository(), new FakeSandboxGateway(), INTERNAL_TOKEN, notificationClient);
 }
 
 function collectBody(overrides: Record<string, unknown> = {}) {
@@ -410,6 +411,54 @@ describe("POST /payments/:id/confirm", () => {
     expect(payouts).toHaveLength(1);
     expect(payouts[0].amountCents).toBe(9000);
     expect(payouts[0].status).toBe("pending");
+  });
+
+  it("sends a payment_confirmed and a payout_received notification on success", async () => {
+    const notificationClient = new FakeNotificationClient();
+    const app = newApp(notificationClient);
+    const collected = await collect(app, collectBody({ amountCents: 10000 }));
+    const paymentId = collected.json().paymentId;
+    const res = await app.inject({ method: "POST", url: `/payments/${paymentId}/confirm`, headers: { "x-user-id": PAYER_ID } });
+    expect(res.statusCode).toBe(200);
+
+    expect(notificationClient.calls).toHaveLength(2);
+    const payerCall = notificationClient.calls.find((c) => c.userId === PAYER_ID);
+    const recipientCall = notificationClient.calls.find((c) => c.userId === RECIPIENT_ID);
+    expect(payerCall).toMatchObject({
+      userId: PAYER_ID,
+      type: "payment_confirmed",
+      referenceType: "payment",
+      referenceId: paymentId,
+    });
+    expect(recipientCall).toMatchObject({
+      userId: RECIPIENT_ID,
+      type: "payout_received",
+      referenceType: "payment",
+      referenceId: paymentId,
+    });
+  });
+
+  it("still confirms the payment (200, completed) even when the notification client fails for both calls", async () => {
+    // degrade-gracefully guarantee: a notification-service outage must never affect the payment
+    const notificationClient = new FakeNotificationClient();
+    notificationClient.setShouldThrow(true);
+    const app = newApp(notificationClient);
+    const collected = await collect(app, collectBody({ amountCents: 10000 }));
+    const paymentId = collected.json().paymentId;
+    const res = await app.inject({ method: "POST", url: `/payments/${paymentId}/confirm`, headers: { "x-user-id": PAYER_ID } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().status).toBe("completed");
+  });
+
+  it("does not send a payment_confirmed notification when the gateway simulates a failure", async () => {
+    const notificationClient = new FakeNotificationClient();
+    const app = newApp(notificationClient);
+    const collected = await collect(app, collectBody({ amountCents: FORCE_FAILURE_AMOUNT_CENTS }));
+    const paymentId = collected.json().paymentId;
+    const res = await app.inject({ method: "POST", url: `/payments/${paymentId}/confirm`, headers: { "x-user-id": PAYER_ID } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().status).toBe("failed");
+    expect(notificationClient.calls).toHaveLength(0);
   });
 });
 

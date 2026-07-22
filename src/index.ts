@@ -3,6 +3,7 @@ import { buildDbPool } from "./db/pool.js";
 import { runMigrations } from "./db/migrate.js";
 import { PostgresPaymentRepository } from "./payments/postgres-repository.js";
 import { FakeSandboxGateway } from "./gateway/provider.js";
+import { HttpNotificationClient } from "./notifications/client.js";
 import { logger } from "./logger.js";
 
 const port = Number(process.env.PORT ?? 3006);
@@ -18,7 +19,12 @@ const dbPool = buildDbPool();
 
 runMigrations(dbPool)
   .then(() => {
-    const app = buildApp(new PostgresPaymentRepository(dbPool), new FakeSandboxGateway());
+    const app = buildApp(
+      new PostgresPaymentRepository(dbPool),
+      new FakeSandboxGateway(),
+      process.env.INTERNAL_SERVICE_TOKEN,
+      new HttpNotificationClient(),
+    );
     return app.listen({ port, host: "0.0.0.0" }).then(() => app.log.info({ port }, "payment-service listening"));
   })
   .catch((err) => {

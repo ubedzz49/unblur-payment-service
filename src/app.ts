@@ -7,6 +7,7 @@ import {
   PaymentType,
   ReferenceType,
 } from "./payments/repository.js";
+import { FakeNotificationClient, NotificationClient } from "./notifications/client.js";
 
 interface CollectBody {
   userId?: string;
@@ -36,10 +37,16 @@ function isUuidLike(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
+// no currency-formatting convention exists elsewhere in this codebase yet -- plain rupee string
+function formatCents(amountCents: number): string {
+  return `₹${(amountCents / 100).toFixed(2)}`;
+}
+
 export function buildApp(
   paymentRepository: PaymentRepository = new InMemoryPaymentRepository(),
   paymentGateway: PaymentGateway = new FakeSandboxGateway(),
   internalServiceToken: string | undefined = process.env.INTERNAL_SERVICE_TOKEN,
+  notificationClient: NotificationClient = new FakeNotificationClient(),
 ): FastifyInstance {
   const app = Fastify({
     logger: process.env.NODE_ENV === "test" ? false : { level: process.env.LOG_LEVEL ?? "info" },
@@ -200,6 +207,36 @@ export function buildApp(
       await paymentRepository.createPayout(payment.recipientUserId, recipientAmountCents, payment.id);
     } else {
       request.log.warn({ paymentId: payment.id }, "payment completed with no recipientUserId, no payout created");
+    }
+
+    // notifications degrade gracefully -- same pattern as resolution-service's StatsClient,
+    // never let this block or fail the confirm itself
+    try {
+      await notificationClient.notify({
+        userId: payment.userId,
+        type: "payment_confirmed",
+        referenceType: "payment",
+        referenceId: payment.id,
+        title: "Payment confirmed",
+        body: `Your payment of ${formatCents(payment.amountCents)} has been confirmed.`,
+      });
+    } catch (err) {
+      request.log.warn({ paymentId: payment.id, err }, "failed to send payment_confirmed notification");
+    }
+
+    if (payment.recipientUserId) {
+      try {
+        await notificationClient.notify({
+          userId: payment.recipientUserId,
+          type: "payout_received",
+          referenceType: "payment",
+          referenceId: payment.id,
+          title: "Payout received",
+          body: `You've received a payout of ${formatCents(recipientAmountCents)}.`,
+        });
+      } catch (err) {
+        request.log.warn({ paymentId: payment.id, err }, "failed to send payout_received notification");
+      }
     }
 
     request.log.info({ paymentId: payment.id }, "payment confirmed and completed");
