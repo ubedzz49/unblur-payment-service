@@ -34,12 +34,17 @@ async function collect(app: ReturnType<typeof newApp>, body: Record<string, unkn
   });
 }
 
-function releasePayout(app: ReturnType<typeof newApp>, paymentId: string, decision: "release" | "withhold" = "release") {
+function releasePayout(
+  app: ReturnType<typeof newApp>,
+  paymentId: string,
+  decision: "release" | "withhold" | "hold" = "release",
+  holdUntil?: string,
+) {
   return app.inject({
     method: "POST",
     url: `/internal/payments/${paymentId}/release-payout`,
     headers: { "x-internal-service-token": INTERNAL_TOKEN },
-    payload: { decision },
+    payload: { decision, holdUntil },
   });
 }
 
@@ -554,6 +559,36 @@ describe("POST /internal/payments/:id/release-payout", () => {
     const res = await releasePayout(app, paymentId, "release");
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ payoutId: null, status: "no_recipient" });
+  });
+
+  it("400s a 'hold' decision with no holdUntil", async () => {
+    const app = newApp();
+    const paymentId = await collectAndConfirm(app);
+    const res = await releasePayout(app, paymentId, "hold");
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("400s a 'hold' decision with an invalid holdUntil", async () => {
+    const app = newApp();
+    const paymentId = await collectAndConfirm(app);
+    const res = await releasePayout(app, paymentId, "hold", "not-a-date");
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("on 'hold' creates a held payout with the given holdUntil and sends no notification yet", async () => {
+    const notificationClient = new FakeNotificationClient();
+    const app = newApp(notificationClient);
+    const paymentId = await collectAndConfirm(app);
+    notificationClient.calls.length = 0;
+    const holdUntil = new Date(Date.now() + 30 * 60_000).toISOString();
+
+    const res = await releasePayout(app, paymentId, "hold", holdUntil);
+    expect(res.statusCode).toBe(201);
+    expect(res.json().status).toBe("held");
+
+    const payoutsRes = await app.inject({ method: "GET", url: "/payouts", headers: { "x-user-id": RECIPIENT_ID } });
+    expect(payoutsRes.json()[0]).toMatchObject({ status: "held", holdUntil });
+    expect(notificationClient.calls).toHaveLength(0);
   });
 });
 

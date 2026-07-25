@@ -2,8 +2,10 @@ import { buildApp } from "./app.js";
 import { buildDbPool } from "./db/pool.js";
 import { runMigrations } from "./db/migrate.js";
 import { PostgresPaymentRepository } from "./payments/postgres-repository.js";
+import { startHoldSweeper } from "./payments/hold-sweep.js";
 import { FakeSandboxGateway } from "./gateway/provider.js";
 import { HttpNotificationClient } from "./notifications/client.js";
+import { HttpComplaintClient } from "./complaints/client.js";
 import { logger } from "./logger.js";
 
 const port = Number(process.env.PORT ?? 3006);
@@ -16,15 +18,25 @@ if (!process.env.INTERNAL_SERVICE_TOKEN) {
 }
 
 const dbPool = buildDbPool();
+const paymentRepository = new PostgresPaymentRepository(dbPool);
 
 runMigrations(dbPool)
   .then(() => {
     const app = buildApp(
-      new PostgresPaymentRepository(dbPool),
+      paymentRepository,
       new FakeSandboxGateway(),
       process.env.INTERNAL_SERVICE_TOKEN,
       new HttpNotificationClient(),
     );
+
+    // Version 5's payout hold window -- only runs against the real Recording Service if
+    // configured, same as recording-service's own DAILY_API_KEY-optional pattern
+    if (process.env.RECORDING_SERVICE_URL) {
+      startHoldSweeper(paymentRepository, new HttpComplaintClient(), new HttpNotificationClient());
+    } else {
+      logger.warn("RECORDING_SERVICE_URL not set, payout hold sweep disabled");
+    }
+
     return app.listen({ port, host: "0.0.0.0" }).then(() => app.log.info({ port }, "payment-service listening"));
   })
   .catch((err) => {

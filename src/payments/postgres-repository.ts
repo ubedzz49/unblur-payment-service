@@ -32,6 +32,7 @@ function rowToPayout(row: any): Payout {
     amountCents: row.amount_cents,
     paymentId: row.payment_id,
     status: row.status,
+    holdUntil: row.hold_until,
     createdAt: row.created_at,
   };
 }
@@ -115,10 +116,16 @@ export class PostgresPaymentRepository implements PaymentRepository {
     return rowToPayment(rows[0]);
   }
 
-  async createPayout(userId: string, amountCents: number, paymentId: string, status: Payout["status"] = "pending"): Promise<Payout> {
+  async createPayout(
+    userId: string,
+    amountCents: number,
+    paymentId: string,
+    status: Payout["status"] = "pending",
+    holdUntil?: string,
+  ): Promise<Payout> {
     const { rows } = await this.pool.query(
-      `INSERT INTO payouts (user_id, amount_cents, payment_id, status) VALUES ($1, $2, $3, $4) RETURNING *`,
-      [userId, amountCents, paymentId, status],
+      `INSERT INTO payouts (user_id, amount_cents, payment_id, status, hold_until) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [userId, amountCents, paymentId, status, holdUntil ?? null],
     );
     return rowToPayout(rows[0]);
   }
@@ -142,5 +149,23 @@ export class PostgresPaymentRepository implements PaymentRepository {
       [userId],
     );
     return rows.map(rowToPayout);
+  }
+
+  async listHeldPayoutsPastHold(now: string): Promise<Payout[]> {
+    const { rows } = await this.pool.query(
+      "SELECT * FROM payouts WHERE status = 'held' AND hold_until <= $1",
+      [now],
+    );
+    return rows.map(rowToPayout);
+  }
+
+  async markPayoutReleased(id: string): Promise<Payout> {
+    const { rows } = await this.pool.query(`UPDATE payouts SET status = 'pending' WHERE id = $1 RETURNING *`, [id]);
+    return rowToPayout(rows[0]);
+  }
+
+  async markPayoutWithheld(id: string): Promise<Payout> {
+    const { rows } = await this.pool.query(`UPDATE payouts SET status = 'withheld' WHERE id = $1 RETURNING *`, [id]);
+    return rowToPayout(rows[0]);
   }
 }
