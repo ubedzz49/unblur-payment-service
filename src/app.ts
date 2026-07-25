@@ -224,12 +224,17 @@ export function buildApp(
     return reply.send(updated);
   });
 
-  app.post<{ Params: { id: string }; Body: { decision?: string } }>(
+  app.post<{ Params: { id: string }; Body: { decision?: string; holdUntil?: string } }>(
     "/internal/payments/:id/release-payout",
     async (request, reply) => {
-      const { decision } = request.body ?? {};
-      if (decision !== "release" && decision !== "withhold") {
-        return reply.code(400).send({ error: "decision must be 'release' or 'withhold'" });
+      const { decision, holdUntil } = request.body ?? {};
+      if (decision !== "release" && decision !== "withhold" && decision !== "hold") {
+        return reply.code(400).send({ error: "decision must be 'release', 'withhold' or 'hold'" });
+      }
+      if (decision === "hold") {
+        if (typeof holdUntil !== "string" || Number.isNaN(new Date(holdUntil).getTime())) {
+          return reply.code(400).send({ error: "holdUntil must be a valid ISO date string when decision is 'hold'" });
+        }
       }
 
       const payment = await paymentRepository.getById(request.params.id);
@@ -252,14 +257,17 @@ export function buildApp(
         return reply.send({ payoutId: null, status: "no_recipient" });
       }
 
-      const payoutStatus = decision === "release" ? "pending" : "withheld";
+      const payoutStatus = decision === "release" ? "pending" : decision === "withhold" ? "withheld" : "held";
       const payout = await paymentRepository.createPayout(
         payment.recipientUserId,
         payment.recipientAmountCents,
         payment.id,
         payoutStatus,
+        decision === "hold" ? holdUntil : undefined,
       );
 
+      // "hold" doesn't notify yet -- the recipient is told once the hold-window sweep actually
+      // releases it (see hold-sweep.ts). Only an immediate "release" notifies right away.
       if (decision === "release") {
         try {
           await notificationClient.notify({

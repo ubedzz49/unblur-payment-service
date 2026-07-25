@@ -1,7 +1,7 @@
 export type PaymentType = "resolution";
 export type ReferenceType = "booking";
 export type PaymentStatus = "pending" | "completed" | "failed" | "refunded";
-export type PayoutStatus = "pending" | "completed" | "failed" | "withheld";
+export type PayoutStatus = "pending" | "completed" | "failed" | "withheld" | "held";
 
 export interface Payment {
   id: string;
@@ -25,6 +25,9 @@ export interface Payout {
   amountCents: number;
   paymentId: string;
   status: PayoutStatus;
+  // only set when status = 'held' -- the payout auto-releases once this passes, unless a
+  // complaint is open against the booking (see the hold-window sweep in app.ts)
+  holdUntil: string | null;
   createdAt: string;
 }
 
@@ -52,10 +55,15 @@ export interface PaymentRepository {
   markFailed(id: string): Promise<Payment>;
   markRefunded(id: string): Promise<Payment>;
 
-  createPayout(userId: string, amountCents: number, paymentId: string, status?: PayoutStatus): Promise<Payout>;
+  createPayout(userId: string, amountCents: number, paymentId: string, status?: PayoutStatus, holdUntil?: string): Promise<Payout>;
   getPayoutByPaymentId(paymentId: string): Promise<Payout | null>;
   markPayoutFailed(id: string): Promise<Payout>;
   listPayoutsByUser(userId: string): Promise<Payout[]>;
+  // payouts sitting in 'held' whose hold window has already passed -- candidates for the
+  // hold-window sweep to resolve one way or the other
+  listHeldPayoutsPastHold(now: string): Promise<Payout[]>;
+  markPayoutReleased(id: string): Promise<Payout>;
+  markPayoutWithheld(id: string): Promise<Payout>;
 }
 
 // in-memory implementation used by tests -- mirrors the Postgres one's exact behavior
@@ -135,13 +143,20 @@ export class InMemoryPaymentRepository implements PaymentRepository {
     return updated;
   }
 
-  async createPayout(userId: string, amountCents: number, paymentId: string, status: PayoutStatus = "pending"): Promise<Payout> {
+  async createPayout(
+    userId: string,
+    amountCents: number,
+    paymentId: string,
+    status: PayoutStatus = "pending",
+    holdUntil?: string,
+  ): Promise<Payout> {
     const payout: Payout = {
       id: crypto.randomUUID(),
       userId,
       amountCents,
       paymentId,
       status,
+      holdUntil: holdUntil ?? null,
       createdAt: new Date().toISOString(),
     };
     this.payouts.set(payout.id, payout);
@@ -165,5 +180,25 @@ export class InMemoryPaymentRepository implements PaymentRepository {
 
   async listPayoutsByUser(userId: string): Promise<Payout[]> {
     return Array.from(this.payouts.values()).filter((p) => p.userId === userId);
+  }
+
+  async listHeldPayoutsPastHold(now: string): Promise<Payout[]> {
+    return Array.from(this.payouts.values()).filter((p) => p.status === "held" && p.holdUntil !== null && p.holdUntil <= now);
+  }
+
+  async markPayoutReleased(id: string): Promise<Payout> {
+    const payout = this.payouts.get(id);
+    if (!payout) throw new Error("payout not found");
+    const updated: Payout = { ...payout, status: "pending" };
+    this.payouts.set(id, updated);
+    return updated;
+  }
+
+  async markPayoutWithheld(id: string): Promise<Payout> {
+    const payout = this.payouts.get(id);
+    if (!payout) throw new Error("payout not found");
+    const updated: Payout = { ...payout, status: "withheld" };
+    this.payouts.set(id, updated);
+    return updated;
   }
 }
