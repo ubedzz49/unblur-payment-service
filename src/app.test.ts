@@ -279,6 +279,62 @@ describe("POST /internal/payments/:id/refund", () => {
   });
 });
 
+describe("POST /admin/payments/refund-by-booking/:bookingId", () => {
+  const ADMIN_HEADERS = { "x-user-id": "admin", "x-user-role": "admin" };
+
+  it("403s a non-admin caller", async () => {
+    const app = newApp();
+    const res = await app.inject({
+      method: "POST",
+      url: `/admin/payments/refund-by-booking/${BOOKING_ID}`,
+      headers: { "x-user-id": PAYER_ID },
+    });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it("404s when no payment exists for that booking", async () => {
+    const app = newApp();
+    const res = await app.inject({
+      method: "POST",
+      url: `/admin/payments/refund-by-booking/${crypto.randomUUID()}`,
+      headers: ADMIN_HEADERS,
+    });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("409s refunding a payment that isn't completed", async () => {
+    const app = newApp();
+    await collect(app);
+    const res = await app.inject({
+      method: "POST",
+      url: `/admin/payments/refund-by-booking/${BOOKING_ID}`,
+      headers: ADMIN_HEADERS,
+    });
+    expect(res.statusCode).toBe(409);
+  });
+
+  it("refunds a completed payment by booking id and flips its payout to failed", async () => {
+    const app = newApp();
+    const collected = await collect(app);
+    await app.inject({ method: "POST", url: `/payments/${collected.json().paymentId}/confirm`, headers: { "x-user-id": PAYER_ID } });
+    await releasePayout(app, collected.json().paymentId, "release");
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/admin/payments/refund-by-booking/${BOOKING_ID}`,
+      headers: ADMIN_HEADERS,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true, paymentId: collected.json().paymentId });
+
+    const payment = await app.inject({ method: "GET", url: `/payments/${collected.json().paymentId}`, headers: { "x-user-id": PAYER_ID } });
+    expect(payment.json().status).toBe("refunded");
+
+    const payoutsRes = await app.inject({ method: "GET", url: "/payouts", headers: { "x-user-id": RECIPIENT_ID } });
+    expect(payoutsRes.json()[0].status).toBe("failed");
+  });
+});
+
 describe("GET /payments/:id", () => {
   it("404s for an unknown id", async () => {
     const app = newApp();
