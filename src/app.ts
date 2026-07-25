@@ -3,6 +3,7 @@ import { FakeSandboxGateway, PaymentGateway } from "./gateway/provider.js";
 import {
   CreatePaymentInput,
   InMemoryPaymentRepository,
+  Payment,
   PaymentRepository,
   PaymentType,
   ReferenceType,
@@ -133,6 +134,19 @@ export function buildApp(
     return reply.code(201).send({ paymentId: payment.id });
   });
 
+  // shared by both refund routes below -- marks the payment refunded and, since this sandbox has
+  // no separate "execute payout" step (a payout row is created pending and stays that way, no
+  // real money movement to wait on), flips any payout for it to failed regardless of what state
+  // it was sitting in. Money already paid out can't be cleanly un-paid-out in a real system
+  // either, so this is the honest sandbox equivalent.
+  async function refundPayment(payment: Payment) {
+    await paymentRepository.markRefunded(payment.id);
+    const payout = await paymentRepository.getPayoutByPaymentId(payment.id);
+    if (payout && payout.status !== "failed") {
+      await paymentRepository.markPayoutFailed(payout.id);
+    }
+  }
+
   app.post<{ Params: { id: string } }>("/internal/payments/:id/refund", async (request, reply) => {
     const payment = await paymentRepository.getById(request.params.id);
     if (!payment) {
@@ -142,20 +156,35 @@ export function buildApp(
       return reply.code(409).send({ error: `cannot refund a payment with status ${payment.status}` });
     }
 
-    await paymentRepository.markRefunded(payment.id);
-
-    // this sandbox has no separate "execute payout" step -- a payout row is created pending
-    // and stays that way, there's no real money movement to wait on. Money already paid out
-    // can't be cleanly un-paid-out in a real system either, so we just flip the payout's status
-    // to reflect the refund happened, regardless of what state it was sitting in
-    const payout = await paymentRepository.getPayoutByPaymentId(payment.id);
-    if (payout && payout.status !== "failed") {
-      await paymentRepository.markPayoutFailed(payout.id);
-    }
-
+    await refundPayment(payment);
     request.log.info({ paymentId: payment.id }, "payment refunded");
     return reply.send({ ok: true });
   });
+
+  // admin dashboard: refunds the poster on a booking when a complaint turns out to be genuine.
+  // Keyed by booking id (not payment id) since that's what the admin dashboard has on hand from
+  // a complaint -- reuses the existing collect-time idempotency key (referenceType/referenceId)
+  // to find the payment, same lookup Resolution Service's own collect call relies on.
+  app.post<{ Params: { bookingId: string } }>(
+    "/admin/payments/refund-by-booking/:bookingId",
+    async (request, reply) => {
+      if (request.headers["x-user-role"] !== "admin") {
+        return reply.code(403).send({ error: "admin access required" });
+      }
+
+      const payment = await paymentRepository.getByReference("booking", request.params.bookingId);
+      if (!payment) {
+        return reply.code(404).send({ error: "no payment found for this booking" });
+      }
+      if (payment.status !== "completed") {
+        return reply.code(409).send({ error: `cannot refund a payment with status ${payment.status}` });
+      }
+
+      await refundPayment(payment);
+      request.log.info({ paymentId: payment.id, bookingId: request.params.bookingId }, "payment refunded by admin");
+      return reply.send({ ok: true, paymentId: payment.id });
+    },
+  );
 
   app.get<{ Querystring: ListPaymentsQuery }>("/payments", async (request) => {
     const userId = request.headers["x-user-id"] as string;
