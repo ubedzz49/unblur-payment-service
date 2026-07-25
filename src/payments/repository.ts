@@ -1,7 +1,7 @@
 export type PaymentType = "resolution";
 export type ReferenceType = "booking";
 export type PaymentStatus = "pending" | "completed" | "failed" | "refunded";
-export type PayoutStatus = "pending" | "completed" | "failed";
+export type PayoutStatus = "pending" | "completed" | "failed" | "withheld";
 
 export interface Payment {
   id: string;
@@ -52,7 +52,7 @@ export interface PaymentRepository {
   markFailed(id: string): Promise<Payment>;
   markRefunded(id: string): Promise<Payment>;
 
-  createPayout(userId: string, amountCents: number, paymentId: string): Promise<Payout>;
+  createPayout(userId: string, amountCents: number, paymentId: string, status?: PayoutStatus): Promise<Payout>;
   getPayoutByPaymentId(paymentId: string): Promise<Payout | null>;
   markPayoutFailed(id: string): Promise<Payout>;
   listPayoutsByUser(userId: string): Promise<Payout[]>;
@@ -135,13 +135,13 @@ export class InMemoryPaymentRepository implements PaymentRepository {
     return updated;
   }
 
-  async createPayout(userId: string, amountCents: number, paymentId: string): Promise<Payout> {
+  async createPayout(userId: string, amountCents: number, paymentId: string, status: PayoutStatus = "pending"): Promise<Payout> {
     const payout: Payout = {
       id: crypto.randomUUID(),
       userId,
       amountCents,
       paymentId,
-      status: "pending",
+      status,
       createdAt: new Date().toISOString(),
     };
     this.payouts.set(payout.id, payout);
