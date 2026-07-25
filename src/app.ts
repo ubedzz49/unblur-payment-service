@@ -201,13 +201,9 @@ export function buildApp(
     const { platformFeeCents, recipientAmountCents } = splitFee(payment.amountCents);
     const updated = await paymentRepository.markCompleted(payment.id, platformFeeCents, recipientAmountCents);
 
-    // resolver payout -- recipientUserId was captured at collect-time since this service has
-    // no way to derive "who resolved this booking" from referenceType/referenceId alone
-    if (payment.recipientUserId) {
-      await paymentRepository.createPayout(payment.recipientUserId, recipientAmountCents, payment.id);
-    } else {
-      request.log.warn({ paymentId: payment.id }, "payment completed with no recipientUserId, no payout created");
-    }
+    // the payout itself no longer happens here -- it's now gated on the resolver's real meeting
+    // attendance, decided by Resolution Service at booking-completion time via
+    // POST /internal/payments/:id/release-payout (see the under-time payout rule)
 
     // notifications degrade gracefully -- same pattern as resolution-service's StatsClient,
     // never let this block or fail the confirm itself
@@ -224,24 +220,65 @@ export function buildApp(
       request.log.warn({ paymentId: payment.id, err }, "failed to send payment_confirmed notification");
     }
 
-    if (payment.recipientUserId) {
-      try {
-        await notificationClient.notify({
-          userId: payment.recipientUserId,
-          type: "payout_received",
-          referenceType: "payment",
-          referenceId: payment.id,
-          title: "Payout received",
-          body: `You've received a payout of ${formatCents(recipientAmountCents)}.`,
-        });
-      } catch (err) {
-        request.log.warn({ paymentId: payment.id, err }, "failed to send payout_received notification");
-      }
-    }
-
     request.log.info({ paymentId: payment.id }, "payment confirmed and completed");
     return reply.send(updated);
   });
+
+  app.post<{ Params: { id: string }; Body: { decision?: string } }>(
+    "/internal/payments/:id/release-payout",
+    async (request, reply) => {
+      const { decision } = request.body ?? {};
+      if (decision !== "release" && decision !== "withhold") {
+        return reply.code(400).send({ error: "decision must be 'release' or 'withhold'" });
+      }
+
+      const payment = await paymentRepository.getById(request.params.id);
+      if (!payment) {
+        return reply.code(404).send({ error: "payment not found" });
+      }
+      if (payment.status !== "completed") {
+        return reply.code(409).send({ error: `cannot release a payout for a payment with status ${payment.status}` });
+      }
+
+      // idempotent -- a retried complete-booking call must never create a second payout
+      const existing = await paymentRepository.getPayoutByPaymentId(payment.id);
+      if (existing) {
+        request.log.info({ paymentId: payment.id, payoutId: existing.id }, "release-payout: returning existing payout");
+        return reply.send({ payoutId: existing.id, status: existing.status });
+      }
+
+      if (!payment.recipientUserId || payment.recipientAmountCents === null) {
+        request.log.warn({ paymentId: payment.id }, "release-payout called with no recipientUserId, no payout created");
+        return reply.send({ payoutId: null, status: "no_recipient" });
+      }
+
+      const payoutStatus = decision === "release" ? "pending" : "withheld";
+      const payout = await paymentRepository.createPayout(
+        payment.recipientUserId,
+        payment.recipientAmountCents,
+        payment.id,
+        payoutStatus,
+      );
+
+      if (decision === "release") {
+        try {
+          await notificationClient.notify({
+            userId: payment.recipientUserId,
+            type: "payout_received",
+            referenceType: "payment",
+            referenceId: payment.id,
+            title: "Payout received",
+            body: `You've received a payout of ${formatCents(payment.recipientAmountCents)}.`,
+          });
+        } catch (err) {
+          request.log.warn({ paymentId: payment.id, err }, "failed to send payout_received notification");
+        }
+      }
+
+      request.log.info({ paymentId: payment.id, payoutId: payout.id, decision }, "payout decided");
+      return reply.code(201).send({ payoutId: payout.id, status: payout.status });
+    },
+  );
 
   app.get("/payouts", async (request) => {
     const userId = request.headers["x-user-id"] as string;

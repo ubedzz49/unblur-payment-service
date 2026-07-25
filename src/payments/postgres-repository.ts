@@ -115,10 +115,10 @@ export class PostgresPaymentRepository implements PaymentRepository {
     return rowToPayment(rows[0]);
   }
 
-  async createPayout(userId: string, amountCents: number, paymentId: string): Promise<Payout> {
+  async createPayout(userId: string, amountCents: number, paymentId: string, status: Payout["status"] = "pending"): Promise<Payout> {
     const { rows } = await this.pool.query(
-      `INSERT INTO payouts (user_id, amount_cents, payment_id) VALUES ($1, $2, $3) RETURNING *`,
-      [userId, amountCents, paymentId],
+      `INSERT INTO payouts (user_id, amount_cents, payment_id, status) VALUES ($1, $2, $3, $4) RETURNING *`,
+      [userId, amountCents, paymentId, status],
     );
     return rowToPayout(rows[0]);
   }

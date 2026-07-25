@@ -34,6 +34,15 @@ async function collect(app: ReturnType<typeof newApp>, body: Record<string, unkn
   });
 }
 
+function releasePayout(app: ReturnType<typeof newApp>, paymentId: string, decision: "release" | "withhold" = "release") {
+  return app.inject({
+    method: "POST",
+    url: `/internal/payments/${paymentId}/release-payout`,
+    headers: { "x-internal-service-token": INTERNAL_TOKEN },
+    payload: { decision },
+  });
+}
+
 describe("GET /healthz", () => {
   it("returns ok status", async () => {
     const app = newApp();
@@ -185,6 +194,12 @@ describe("POST /internal/payments/:id/refund", () => {
     return paymentId;
   }
 
+  async function collectConfirmAndReleasePayout(app: ReturnType<typeof newApp>, amountCents = 10000) {
+    const paymentId = await collectAndConfirm(app, amountCents);
+    await releasePayout(app, paymentId, "release");
+    return paymentId;
+  }
+
   it("404s for an unknown id", async () => {
     const app = newApp();
     const res = await app.inject({
@@ -242,7 +257,7 @@ describe("POST /internal/payments/:id/refund", () => {
 
   it("succeeds refunding a completed payment and flips its payout to failed", async () => {
     const app = newApp();
-    const paymentId = await collectAndConfirm(app);
+    const paymentId = await collectConfirmAndReleasePayout(app);
 
     const res = await app.inject({
       method: "POST",
@@ -400,20 +415,17 @@ describe("POST /payments/:id/confirm", () => {
     expect(body.platformFeeCents + body.recipientAmountCents).toBe(10001);
   });
 
-  it("creates a payout for the recipient on success", async () => {
+  it("no longer creates a payout on confirm -- that's decided later via release-payout", async () => {
     const app = newApp();
     const collected = await collect(app, collectBody({ amountCents: 10000 }));
     const paymentId = collected.json().paymentId;
     await app.inject({ method: "POST", url: `/payments/${paymentId}/confirm`, headers: { "x-user-id": PAYER_ID } });
 
     const payoutsRes = await app.inject({ method: "GET", url: "/payouts", headers: { "x-user-id": RECIPIENT_ID } });
-    const payouts = payoutsRes.json();
-    expect(payouts).toHaveLength(1);
-    expect(payouts[0].amountCents).toBe(9000);
-    expect(payouts[0].status).toBe("pending");
+    expect(payoutsRes.json()).toEqual([]);
   });
 
-  it("sends a payment_confirmed and a payout_received notification on success", async () => {
+  it("sends only a payment_confirmed notification on success -- payout_received now waits for release-payout", async () => {
     const notificationClient = new FakeNotificationClient();
     const app = newApp(notificationClient);
     const collected = await collect(app, collectBody({ amountCents: 10000 }));
@@ -421,18 +433,10 @@ describe("POST /payments/:id/confirm", () => {
     const res = await app.inject({ method: "POST", url: `/payments/${paymentId}/confirm`, headers: { "x-user-id": PAYER_ID } });
     expect(res.statusCode).toBe(200);
 
-    expect(notificationClient.calls).toHaveLength(2);
-    const payerCall = notificationClient.calls.find((c) => c.userId === PAYER_ID);
-    const recipientCall = notificationClient.calls.find((c) => c.userId === RECIPIENT_ID);
-    expect(payerCall).toMatchObject({
+    expect(notificationClient.calls).toHaveLength(1);
+    expect(notificationClient.calls[0]).toMatchObject({
       userId: PAYER_ID,
       type: "payment_confirmed",
-      referenceType: "payment",
-      referenceId: paymentId,
-    });
-    expect(recipientCall).toMatchObject({
-      userId: RECIPIENT_ID,
-      type: "payout_received",
       referenceType: "payment",
       referenceId: paymentId,
     });
@@ -462,12 +466,104 @@ describe("POST /payments/:id/confirm", () => {
   });
 });
 
+describe("POST /internal/payments/:id/release-payout", () => {
+  async function collectAndConfirm(app: ReturnType<typeof newApp>, overrides: Record<string, unknown> = {}) {
+    const collected = await collect(app, collectBody({ amountCents: 10000, referenceId: crypto.randomUUID(), ...overrides }));
+    const paymentId = collected.json().paymentId;
+    await app.inject({ method: "POST", url: `/payments/${paymentId}/confirm`, headers: { "x-user-id": PAYER_ID } });
+    return paymentId;
+  }
+
+  it("401s with no internal token", async () => {
+    const app = newApp();
+    const res = await app.inject({ method: "POST", url: "/internal/payments/some-id/release-payout", payload: { decision: "release" } });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("400s an invalid decision", async () => {
+    const app = newApp();
+    const paymentId = await collectAndConfirm(app);
+    const res = await releasePayout(app, paymentId, "maybe" as never);
+    expect(res.statusCode).toBe(400);
+  });
+
+  it("404s for an unknown payment", async () => {
+    const app = newApp();
+    const res = await releasePayout(app, "does-not-exist");
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("409s releasing a payout for a payment that isn't completed", async () => {
+    const app = newApp();
+    const collected = await collect(app, collectBody({ referenceId: crypto.randomUUID() }));
+    const res = await releasePayout(app, collected.json().paymentId);
+    expect(res.statusCode).toBe(409);
+  });
+
+  it("on 'release' creates a pending payout with the recipient's amount and sends a payout_received notification", async () => {
+    const notificationClient = new FakeNotificationClient();
+    const app = newApp(notificationClient);
+    const paymentId = await collectAndConfirm(app);
+
+    const res = await releasePayout(app, paymentId, "release");
+    expect(res.statusCode).toBe(201);
+    expect(res.json().status).toBe("pending");
+
+    const payoutsRes = await app.inject({ method: "GET", url: "/payouts", headers: { "x-user-id": RECIPIENT_ID } });
+    const payouts = payoutsRes.json();
+    expect(payouts).toHaveLength(1);
+    expect(payouts[0].amountCents).toBe(9000);
+    expect(payouts[0].status).toBe("pending");
+
+    const payoutReceivedCalls = notificationClient.calls.filter((c) => c.type === "payout_received");
+    expect(payoutReceivedCalls).toHaveLength(1);
+    expect(payoutReceivedCalls[0]).toMatchObject({ userId: RECIPIENT_ID, type: "payout_received" });
+  });
+
+  it("on 'withhold' creates a withheld payout and sends no payout_received notification", async () => {
+    const notificationClient = new FakeNotificationClient();
+    const app = newApp(notificationClient);
+    const paymentId = await collectAndConfirm(app);
+    notificationClient.calls.length = 0; // ignore confirm's own payment_confirmed notification
+
+    const res = await releasePayout(app, paymentId, "withhold");
+    expect(res.statusCode).toBe(201);
+    expect(res.json().status).toBe("withheld");
+
+    const payoutsRes = await app.inject({ method: "GET", url: "/payouts", headers: { "x-user-id": RECIPIENT_ID } });
+    expect(payoutsRes.json()[0].status).toBe("withheld");
+    expect(notificationClient.calls).toHaveLength(0);
+  });
+
+  it("is idempotent -- a second call returns the existing payout instead of creating another", async () => {
+    const app = newApp();
+    const paymentId = await collectAndConfirm(app);
+
+    const first = await releasePayout(app, paymentId, "release");
+    const second = await releasePayout(app, paymentId, "withhold");
+    expect(second.json()).toEqual(first.json());
+
+    const payoutsRes = await app.inject({ method: "GET", url: "/payouts", headers: { "x-user-id": RECIPIENT_ID } });
+    expect(payoutsRes.json()).toHaveLength(1);
+  });
+
+  it("creates no payout when the payment has no recipientUserId", async () => {
+    const app = newApp();
+    const paymentId = await collectAndConfirm(app, { recipientUserId: undefined });
+
+    const res = await releasePayout(app, paymentId, "release");
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ payoutId: null, status: "no_recipient" });
+  });
+});
+
 describe("GET /payouts", () => {
   it("never leaks another user's payouts", async () => {
     const app = newApp();
     const collected = await collect(app, collectBody({ amountCents: 10000 }));
     const paymentId = collected.json().paymentId;
     await app.inject({ method: "POST", url: `/payments/${paymentId}/confirm`, headers: { "x-user-id": PAYER_ID } });
+    await releasePayout(app, paymentId, "release");
 
     const res = await app.inject({
       method: "GET",
