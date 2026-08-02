@@ -678,3 +678,47 @@ describe("GET /payouts", () => {
     expect(res.json()).toEqual([]);
   });
 });
+
+describe("log level management", () => {
+  it("rejects without a valid internal token", async () => {
+    const app = newApp();
+    const res = await app.inject({ method: "GET", url: "/internal/log-level" });
+    expect(res.statusCode).toBe(401);
+  });
+
+  it("reads and changes the runtime log level", async () => {
+    const app = newApp();
+    const get = await app.inject({ method: "GET", url: "/internal/log-level", headers: { "x-internal-service-token": INTERNAL_TOKEN } });
+    expect(get.json().level).toBe("info");
+
+    const set = await app.inject({
+      method: "POST",
+      url: "/internal/log-level",
+      headers: { "x-internal-service-token": INTERNAL_TOKEN },
+      payload: { level: "error" },
+    });
+    expect(set.statusCode).toBe(200);
+    expect(set.json().level).toBe("error");
+
+    // logger.level is a module-level singleton (intentionally, so it's mutable process-wide
+    // without a redeploy) -- reset it so this test doesn't leak state into any test that runs
+    // after it in the same file
+    await app.inject({
+      method: "POST",
+      url: "/internal/log-level",
+      headers: { "x-internal-service-token": INTERNAL_TOKEN },
+      payload: { level: "info" },
+    });
+  });
+
+  it("rejects an unrecognized level", async () => {
+    const app = newApp();
+    const res = await app.inject({
+      method: "POST",
+      url: "/internal/log-level",
+      headers: { "x-internal-service-token": INTERNAL_TOKEN },
+      payload: { level: "verbose" },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+});
