@@ -10,6 +10,13 @@ import {
   ReferenceType,
 } from "./payments/repository.js";
 import { FakeNotificationClient, NotificationClient } from "./notifications/client.js";
+import { AuditLogClient, FakeAuditLogClient } from "./admin/audit-log-client.js";
+
+// superadmin is a strictly higher tier than admin (Version 9 RBAC) -- anywhere "admin" is
+// allowed, "superadmin" is too
+function isAdminRole(role: unknown): boolean {
+  return role === "admin" || role === "superadmin";
+}
 
 interface CollectBody {
   userId?: string;
@@ -49,6 +56,7 @@ export function buildApp(
   paymentGateway: PaymentGateway = new FakeSandboxGateway(),
   internalServiceToken: string | undefined = process.env.INTERNAL_SERVICE_TOKEN,
   notificationClient: NotificationClient = new FakeNotificationClient(),
+  auditLogClient: AuditLogClient = new FakeAuditLogClient(),
 ): FastifyInstance {
   const app = Fastify(
     process.env.NODE_ENV === "test"
@@ -190,7 +198,7 @@ export function buildApp(
   app.post<{ Params: { bookingId: string } }>(
     "/admin/payments/refund-by-booking/:bookingId",
     async (request, reply) => {
-      if (request.headers["x-user-role"] !== "admin") {
+      if (!isAdminRole(request.headers["x-user-role"])) {
         return reply.code(403).send({ error: "admin access required" });
       }
 
@@ -203,6 +211,14 @@ export function buildApp(
       }
 
       await refundPayment(payment);
+      await auditLogClient.record({
+        adminUserId: (request.headers["x-user-id"] as string) ?? "unknown",
+        adminUsername: (request.headers["x-user-username"] as string) ?? "unknown",
+        action: "refund_booking",
+        targetType: "booking",
+        targetId: request.params.bookingId,
+        metadata: { paymentId: payment.id },
+      });
       request.log.info({ paymentId: payment.id, bookingId: request.params.bookingId }, "payment refunded by admin");
       return reply.send({ ok: true, paymentId: payment.id });
     },

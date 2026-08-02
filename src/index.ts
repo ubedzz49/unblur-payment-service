@@ -6,6 +6,7 @@ import { startHoldSweeper } from "./payments/hold-sweep.js";
 import { FakeSandboxGateway } from "./gateway/provider.js";
 import { HttpNotificationClient } from "./notifications/client.js";
 import { HttpComplaintClient } from "./complaints/client.js";
+import { HttpAuditLogClient } from "./admin/audit-log-client.js";
 import { logger } from "./logger.js";
 
 const port = Number(process.env.PORT ?? 3006);
@@ -27,6 +28,7 @@ runMigrations(dbPool)
       new FakeSandboxGateway(),
       process.env.INTERNAL_SERVICE_TOKEN,
       new HttpNotificationClient(),
+      new HttpAuditLogClient(),
     );
 
     // Version 5's payout hold window -- only runs against the real Recording Service if

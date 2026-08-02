@@ -3,14 +3,15 @@ import { buildApp } from "./app.js";
 import { InMemoryPaymentRepository } from "./payments/repository.js";
 import { FakeSandboxGateway, FORCE_FAILURE_AMOUNT_CENTS } from "./gateway/provider.js";
 import { FakeNotificationClient } from "./notifications/client.js";
+import { FakeAuditLogClient } from "./admin/audit-log-client.js";
 
 const INTERNAL_TOKEN = "test-internal-token";
 const PAYER_ID = "11111111-1111-1111-1111-111111111111";
 const RECIPIENT_ID = "22222222-2222-2222-2222-222222222222";
 const BOOKING_ID = "33333333-3333-3333-3333-333333333333";
 
-function newApp(notificationClient = new FakeNotificationClient()) {
-  return buildApp(new InMemoryPaymentRepository(), new FakeSandboxGateway(), INTERNAL_TOKEN, notificationClient);
+function newApp(notificationClient = new FakeNotificationClient(), auditLogClient = new FakeAuditLogClient()) {
+  return buildApp(new InMemoryPaymentRepository(), new FakeSandboxGateway(), INTERNAL_TOKEN, notificationClient, auditLogClient);
 }
 
 function collectBody(overrides: Record<string, unknown> = {}) {
@@ -306,6 +307,17 @@ describe("POST /admin/payments/refund-by-booking/:bookingId", () => {
     expect(res.statusCode).toBe(403);
   });
 
+  it("allows a superadmin caller, not just admin", async () => {
+    const app = newApp();
+    const res = await app.inject({
+      method: "POST",
+      url: `/admin/payments/refund-by-booking/${crypto.randomUUID()}`,
+      headers: { "x-user-id": "super-1", "x-user-role": "superadmin" },
+    });
+    // 404 (no payment for a random booking id) proves it got past the role check, not a 403
+    expect(res.statusCode).toBe(404);
+  });
+
   it("404s when no payment exists for that booking", async () => {
     const app = newApp();
     const res = await app.inject({
@@ -327,8 +339,9 @@ describe("POST /admin/payments/refund-by-booking/:bookingId", () => {
     expect(res.statusCode).toBe(409);
   });
 
-  it("refunds a completed payment by booking id and flips its payout to failed", async () => {
-    const app = newApp();
+  it("refunds a completed payment by booking id, flips its payout to failed, and records an audit entry", async () => {
+    const auditLogClient = new FakeAuditLogClient();
+    const app = newApp(new FakeNotificationClient(), auditLogClient);
     const collected = await collect(app);
     await app.inject({ method: "POST", url: `/payments/${collected.json().paymentId}/confirm`, headers: { "x-user-id": PAYER_ID } });
     await releasePayout(app, collected.json().paymentId, "release");
@@ -336,10 +349,12 @@ describe("POST /admin/payments/refund-by-booking/:bookingId", () => {
     const res = await app.inject({
       method: "POST",
       url: `/admin/payments/refund-by-booking/${BOOKING_ID}`,
-      headers: ADMIN_HEADERS,
+      headers: { ...ADMIN_HEADERS, "x-user-username": "boss" },
     });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ ok: true, paymentId: collected.json().paymentId });
+    expect(auditLogClient.calls).toHaveLength(1);
+    expect(auditLogClient.calls[0]).toMatchObject({ action: "refund_booking", adminUsername: "boss", targetId: BOOKING_ID });
 
     const payment = await app.inject({ method: "GET", url: `/payments/${collected.json().paymentId}`, headers: { "x-user-id": PAYER_ID } });
     expect(payment.json().status).toBe("refunded");
