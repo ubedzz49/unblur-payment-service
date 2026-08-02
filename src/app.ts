@@ -24,8 +24,8 @@ interface ListPaymentsQuery {
   status?: string;
 }
 
-const VALID_TYPES: PaymentType[] = ["resolution"];
-const VALID_REFERENCE_TYPES: ReferenceType[] = ["booking"];
+const VALID_TYPES: PaymentType[] = ["resolution", "seminar_entry", "gd_organizer", "gd_entry"];
+const VALID_REFERENCE_TYPES: ReferenceType[] = ["booking", "seminar_registration", "gd", "gd_participant"];
 
 // 10% platform cut, matches the design doc's fee split -- integer cents, rounded rather than
 // truncated so the fee+recipient split always sums back to the original amount

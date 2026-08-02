@@ -159,8 +159,22 @@ describe("POST /internal/payments/collect", () => {
 
   it("400s with a wrong referenceType literal", async () => {
     const app = newApp();
-    const res = await collect(app, collectBody({ referenceType: "gd" }));
+    const res = await collect(app, collectBody({ referenceType: "not-a-real-reference-type" }));
     expect(res.statusCode).toBe(400);
+  });
+
+  it("accepts seminar_entry/seminar_registration (Seminar Service)", async () => {
+    const app = newApp();
+    const res = await collect(app, collectBody({ type: "seminar_entry", referenceType: "seminar_registration" }));
+    expect(res.statusCode).toBe(201);
+  });
+
+  it("accepts gd_organizer/gd and gd_entry/gd_participant (GD Service)", async () => {
+    const app = newApp();
+    const res1 = await collect(app, collectBody({ type: "gd_organizer", referenceType: "gd" }));
+    expect(res1.statusCode).toBe(201);
+    const res2 = await collect(app, collectBody({ type: "gd_entry", referenceType: "gd_participant", referenceId: "ref-2" }));
+    expect(res2.statusCode).toBe(201);
   });
 
   it("400s with a missing referenceType", async () => {

@@ -1,5 +1,5 @@
-export type PaymentType = "resolution";
-export type ReferenceType = "booking";
+export type PaymentType = "resolution" | "seminar_entry" | "gd_organizer" | "gd_entry";
+export type ReferenceType = "booking" | "seminar_registration" | "gd" | "gd_participant";
 export type PaymentStatus = "pending" | "completed" | "failed" | "refunded";
 export type PayoutStatus = "pending" | "completed" | "failed" | "withheld" | "held";
 
